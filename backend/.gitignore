@@ -1,0 +1,27 @@
+# Entornos
+.venv/
+backend/.venv/
+node_modules/
+
+# Base de datos
+backend/data/*.db
+*.sqlite
+*.sqlite3
+
+# Fotografías cargadas
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Backups
+backend/backups/*
+!backend/backups/.gitkeep
+
+# Reportes locales
+backend/reports/
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+*.log

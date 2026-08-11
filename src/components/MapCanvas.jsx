@@ -22,12 +22,10 @@ const BASE_URL = import.meta.env.BASE_URL;
 const DATA_URLS = {
   provincias: `${BASE_URL}data/provincias.geojson`,
   distritos: `${BASE_URL}data/distritos.geojson`,
-  proyectos: `${BASE_URL}data/proyectos.geojson`,
 };
 console.info("BASE_URL:", import.meta.env.BASE_URL);
 console.info("URL provincias:", DATA_URLS.provincias);
 console.info("URL distritos:", DATA_URLS.distritos);
-console.info("URL proyectos:", DATA_URLS.proyectos);
 console.info("DATA_URLS producción:", DATA_URLS);
 const SOURCE_IDS = { provinces: "provinces-source", districts: "districts-source", projects: "projects-source" };
 const LAYER_IDS = {
@@ -105,10 +103,11 @@ function enrichDistricts(data) {
   return data;
 }
 
-function filterProjectFeatures(data, projects) {
-  if (!data || !projects?.length) return { ...(data || { type: "FeatureCollection" }), features: [] };
-  const visibleIds = new Set(projects.map(({ id }) => String(id)));
-  return { ...data, features: data.features.filter(({ properties }) => visibleIds.has(String(properties?.id))) };
+function featureCollectionFromProjects(projects = []) {
+  return {
+    type: "FeatureCollection",
+    features: projects.map((project) => project?.feature).filter((feature) => feature?.type === "Feature" && feature?.geometry?.type === "Point"),
+  };
 }
 
 export function getGeoJSONBounds(input) {
@@ -177,8 +176,7 @@ function addTerritorialLayers(map, provinces, districts) {
   if (!map.getLayer(LAYER.districtsLine)) runMapOperation(LAYER.districtsLine, () => map.addLayer({ id: LAYER.districtsLine, type: "line", source: SOURCE.districts, paint: { "line-color": "#2a9d8f", "line-width": 0.45, "line-opacity": 0.55 } }));
 }
 
-function addProjectLayers(map, originalData, projects) {
-  const data = filterProjectFeatures(originalData, projects);
+function addProjectLayers(map, data) {
   if (!map.getSource(SOURCE.projects)) runMapOperation(SOURCE.projects, () => map.addSource(SOURCE.projects, { type: "geojson", data, cluster: true, clusterMaxZoom: 12, clusterRadius: 48, generateId: true }));
   if (!map.getLayer(LAYER.clusters)) runMapOperation(LAYER.clusters, () => map.addLayer({ id: LAYER.clusters, type: "circle", source: SOURCE.projects, filter: ["has", "point_count"], paint: {
     "circle-color": "#0f5132", "circle-radius": ["case", ["boolean", ["feature-state", "hover"], false], ["step", ["get", "point_count"], 22, 10, 27, 30, 33], ["step", ["get", "point_count"], 19, 10, 24, 30, 30]],
@@ -204,9 +202,11 @@ export function fitMapToGeometry(map, geometry, options = {}) {
 }
 
 export function selectProject(map, feature, projects, onSelect) {
-  const project = projects.find(({ id }) => String(id) === String(feature?.properties?.id));
-  if (project) onSelect?.(project);
-  if (feature?.geometry) fitMapToGeometry(map, feature.geometry, { maxZoom: 11.5 });
+  const projectId = feature?.properties?.id;
+  const project = projects.find(({ id }) => String(id) === String(projectId));
+  console.info("Feature seleccionado:", feature);
+  if (project) onSelect?.(String(project.id));
+  if (feature?.geometry?.type === "Point") map.easeTo({ center: feature.geometry.coordinates, zoom: Math.max(map.getZoom(), 13), duration: 700 });
 }
 
 export function changeBaseMap(map, style = BASE_MAPS.claro) {
@@ -329,12 +329,12 @@ export default function MapCanvas({ projects, selectedId, onSelect, selectedProv
       console.info("Provincias:", provincesDataRef.current.features.length);
       districtsDataRef.current ||= enrichDistricts(await fetchGeoJSON(DATA_URLS.distritos));
       console.info("Distritos:", districtsDataRef.current.features.length);
-      projectsDataRef.current ||= await fetchGeoJSON(DATA_URLS.proyectos);
-      console.info("Proyectos:", projectsDataRef.current.features.length);
+      projectsDataRef.current = featureCollectionFromProjects(projectsRef.current);
+      console.info("Proyectos visibles:", projectsDataRef.current.features.length);
       addTerritorialLayers(map, provincesDataRef.current, districtsDataRef.current);
-      addProjectLayers(map, projectsDataRef.current, projectsRef.current);
+      addProjectLayers(map, projectsDataRef.current);
       const projectSource = map.getSource(SOURCE.projects);
-      if (projectSource) projectSource.setData(filterProjectFeatures(projectsDataRef.current, projectsRef.current));
+      if (projectSource) projectSource.setData(projectsDataRef.current);
       applyTerritorialSelection(map);
       if (map.getLayer(LAYER.selected)) map.setFilter(LAYER.selected, ["==", ["to-string", ["get", "id"]], String(selectedIdRef.current ?? "")]);
       [LAYER.provincesFill, LAYER.provincesHalo, LAYER.provincesLine, LAYER.districtsFill, LAYER.districtsHalo, LAYER.districtsLine, LAYER.clusters, LAYER.clusterCount, LAYER.points, LAYER.selected].forEach((id) => { if (map.getLayer(id)) map.moveLayer(id); });
@@ -368,8 +368,14 @@ export default function MapCanvas({ projects, selectedId, onSelect, selectedProv
     } catch (error) { console.error("No se pudo expandir el clúster:", error); }
   };
   const handleProjectClick = (event) => { const map = mapRef.current; if (map && event.features?.[0]) selectProject(map, event.features[0], projectsRef.current, onSelectRef.current); };
-  const handleProvinceClick = (event) => { if (event.features?.[0]) callbacksRef.current.onSelectProvince?.(getProvinceName(event.features[0])); };
-  const handleDistrictClick = (event) => { if (event.features?.[0]) callbacksRef.current.onSelectDistrict?.(getDistrictProvinceName(event.features[0]), getDistrictName(event.features[0])); };
+  const clickContainsProject = (event) => {
+    const map = mapRef.current;
+    if (!map || !event?.point) return false;
+    const layers = [LAYER.clusters, LAYER.points].filter((layer) => map.getLayer(layer));
+    return layers.length > 0 && map.queryRenderedFeatures(event.point, { layers }).length > 0;
+  };
+  const handleProvinceClick = (event) => { if (!clickContainsProject(event) && event.features?.[0]) callbacksRef.current.onSelectProvince?.(getProvinceName(event.features[0])); };
+  const handleDistrictClick = (event) => { if (!clickContainsProject(event) && event.features?.[0]) callbacksRef.current.onSelectDistrict?.(getDistrictProvinceName(event.features[0]), getDistrictName(event.features[0])); };
   const handlePointerEnter = () => { if (mapRef.current) mapRef.current.getCanvas().style.cursor = "pointer"; };
   const handlePointerLeave = () => { if (mapRef.current) mapRef.current.getCanvas().style.cursor = ""; };
 
@@ -383,8 +389,12 @@ export default function MapCanvas({ projects, selectedId, onSelect, selectedProv
     });
   };
 
-  useEffect(() => { projectsRef.current = projects; }, [projects]);
-  useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
+  useEffect(() => {
+    projectsRef.current = projects;
+    projectsDataRef.current = featureCollectionFromProjects(projects);
+    console.info("Proyectos visibles:", projectsDataRef.current.features.length);
+  }, [projects]);
+  useEffect(() => { selectedIdRef.current = selectedId; console.info("Proyecto seleccionado:", selectedId); }, [selectedId]);
   useEffect(() => { onSelectRef.current = onSelect; }, [onSelect]);
   useEffect(() => { callbacksRef.current = { onSelectProvince, onSelectDistrict }; }, [onSelectProvince, onSelectDistrict]);
 
@@ -447,7 +457,7 @@ export default function MapCanvas({ projects, selectedId, onSelect, selectedProv
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReadyRef.current || !canUseStyle(map)) return;
-    try { map.getSource(SOURCE.projects)?.setData(filterProjectFeatures(projectsDataRef.current, projects)); }
+    try { map.getSource(SOURCE.projects)?.setData(projectsDataRef.current); }
     catch (error) { console.error("No se pudieron actualizar los proyectos filtrados:", error); }
   }, [projects]);
 
@@ -478,7 +488,7 @@ export default function MapCanvas({ projects, selectedId, onSelect, selectedProv
     if (mapAction.type === "locate") focusSelectedTerritory(map);
     if (mapAction.type === "selected" && selectedId && projectsDataRef.current) {
       const feature = projectsDataRef.current.features.find((item) => String(item.properties?.id) === String(selectedId));
-      if (feature) fitMapToGeometry(map, feature.geometry, { maxZoom: 11.5 });
+      if (feature?.geometry?.type === "Point") map.easeTo({ center: feature.geometry.coordinates, zoom: Math.max(map.getZoom(), 13), duration: 700 });
     }
   }, [mapAction, selectedId]);
 
@@ -493,12 +503,11 @@ export default function MapCanvas({ projects, selectedId, onSelect, selectedProv
       map?.resize();
       if (!map || !projectPanelOpen || !selectedId || !projectsDataRef.current) return;
       const feature = projectsDataRef.current.features.find((item) => String(item.properties?.id) === String(selectedId));
-      const bounds = getFeatureBounds(feature);
-      if (!bounds) return;
+      if (feature?.geometry?.type !== "Point") return;
       const mobile = window.innerWidth < 768;
-      map.fitBounds(bounds, { maxZoom: 12, duration: 700, padding: mobile
-        ? { top: 80, right: 35, bottom: 300, left: 35 }
-        : { top: 100, right: 420, bottom: 80, left: filtersOpen ? 340 : 70 } });
+      map.easeTo({ center: feature.geometry.coordinates, zoom: Math.max(map.getZoom(), 13), duration: 700, offset: mobile
+        ? [0, -110]
+        : [filtersOpen ? 20 : -150, 0] });
     }, 260);
     return () => window.clearTimeout(timer);
   }, [projectPanelOpen, selectedId, filtersOpen]);

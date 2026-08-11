@@ -1,8 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Search, SlidersHorizontal, X, ChevronLeft, ChevronRight, Map, Layers3, ZoomIn, ZoomOut, LocateFixed, FolderKanban, Activity, Users, Landmark, MapPin, CalendarDays, Building2, Sprout, Download, Share2, Image as ImageIcon, BarChart3, Info, Menu, CheckCircle2 } from 'lucide-react'
 import { BarChart, Bar, XAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import MapCanvas from './components/MapCanvas'
+import ProjectManagement from './components/admin/ProjectManagement'
+import AdminLogin from './components/admin/AdminLogin'
 import { Button } from './components/ui/button'
+import { fetchProjectsFromApi, projectsToFeatureCollection } from './services/projectsApi'
+import { getCurrentAdmin, logout as clearAdminSession } from './services/authApi'
 import LOGO_URL from '../assets/img/logo_draa.jpg'
 
 const PROJECTS_URL = `${import.meta.env.BASE_URL}data/proyectos.geojson`
@@ -35,7 +39,11 @@ function SelectFilter({ label, value, onChange, options }) {
 }
 
 function App() {
+  const [currentView, setCurrentView] = useState('viewer')
+  const [adminUser, setAdminUser] = useState(null)
   const [projects, setProjects] = useState([])
+  const [projectsError, setProjectsError] = useState('')
+  const [isRefreshingProjects, setIsRefreshingProjects] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
   const [isSearchOpen, setIsSearchOpen] = useState(false)
   const [activeSearchIndex, setActiveSearchIndex] = useState(-1)
@@ -48,19 +56,74 @@ function App() {
   const [mapAction, setMapAction] = useState(null)
   const [activePhoto, setActivePhoto] = useState('')
   const [printPhotoFailed, setPrintPhotoFailed] = useState(false)
+  const selectedResultRef = useRef(null)
+  const projectsRequestRef = useRef({ id: 0, controller: null })
   const runMapAction = type => setMapAction({ type, at: Date.now() })
 
   useEffect(() => {
-    fetch(PROJECTS_URL).then(r => r.json()).then(data => {
-      const parsed = data.features.map(f => ({
+    getCurrentAdmin().then(user => { if(user)setAdminUser(user) }).catch(() => setAdminUser(null))
+    const expired=()=>{setAdminUser(null);setCurrentView('login')}
+    window.addEventListener('draa:auth-expired',expired)
+    return()=>window.removeEventListener('draa:auth-expired',expired)
+  },[])
+
+  const loadProjects = useCallback(async () => {
+    projectsRequestRef.current.controller?.abort()
+    const controller = new AbortController()
+    const requestId = projectsRequestRef.current.id + 1
+    projectsRequestRef.current = { id: requestId, controller }
+    const mapFeatures = features => features.map(f => ({
         id:getProjectId(f), code:getProjectCode(f), name:getProjectName(f), province:getProjectProvince(f), district:getProjectDistrict(f), chain:getProjectChain(f),
         status:normalizeStatus(getProjectStatus(f)), budget:getProjectInvestment(f), beneficiaries:getProjectBeneficiaries(f), execution:normalizeProgress(getProjectProgress(f)),
-        year:getProjectYear(f), community:f.properties.comunidad, description:getProjectDescription(f), photos:getProjectImages(f),
-        coordinates:f.geometry?.type === 'Point' && Array.isArray(f.geometry.coordinates) ? f.geometry.coordinates : null
+        year:getProjectYear(f), community:f.properties?.comunidad, description:getProjectDescription(f), photos:getProjectImages(f),
+        coordinates:f.geometry?.type === 'Point' && Array.isArray(f.geometry.coordinates) ? f.geometry.coordinates : null,
+        feature:f
       })).filter(project => { if(project.id===null){ if(import.meta.env.DEV) console.warn('Proyecto sin ID:',project); return false } return true })
-      if (parsed.length) setProjects(parsed)
-    }).catch(() => {})
+    const commit = (nextProjects, source) => {
+      if (controller.signal.aborted || projectsRequestRef.current.id !== requestId) return
+      setProjects(nextProjects); setProjectsError('')
+      console.info('Proyectos recibidos:', nextProjects.length)
+      console.info('Fuente:', source)
+    }
+    try {
+      const apiProjects = await fetchProjectsFromApi({ signal:controller.signal })
+      commit(mapFeatures(projectsToFeatureCollection(apiProjects).features), 'api')
+      return 'api'
+    } catch (apiError) {
+      if (controller.signal.aborted) return null
+      console.warn('API no disponible. Usando respaldo GeoJSON.', apiError)
+      try {
+        const response = await fetch(PROJECTS_URL, { signal:controller.signal })
+        if (!response.ok) throw new Error(`GeoJSON de proyectos: ${response.status} ${response.statusText}`)
+        const geojson = await response.json()
+        if (geojson?.type !== 'FeatureCollection' || !Array.isArray(geojson.features)) throw new Error('El respaldo de proyectos no es un FeatureCollection válido')
+        commit(mapFeatures(geojson.features), 'geojson')
+        return 'geojson'
+      } catch (fallbackError) {
+        if (controller.signal.aborted) return null
+        console.error('No fue posible cargar proyectos desde API ni GeoJSON.', fallbackError)
+        if (projectsRequestRef.current.id === requestId) { setProjects([]); setProjectsError('No fue posible cargar la información de proyectos.') }
+        return null
+      }
+    }
   }, [])
+
+  useEffect(() => {
+    loadProjects()
+    return () => projectsRequestRef.current.controller?.abort()
+  }, [loadProjects])
+
+  useEffect(() => {
+    setFilters(current => {
+      const province = current.province && projects.some(project => project.province === current.province) ? current.province : ''
+      const district = current.district && projects.some(project => (!province || project.province === province) && project.district === current.district) ? current.district : ''
+      const chain = current.chain && projects.some(project => project.chain === current.chain) ? current.chain : ''
+      const status = current.status && projects.some(project => project.status === current.status) ? current.status : ''
+      const year = current.year && projects.some(project => String(project.year) === String(current.year)) ? current.year : ''
+      if (province === current.province && district === current.district && chain === current.chain && status === current.status && year === current.year) return current
+      return { province, district, chain, status, year }
+    })
+  }, [projects])
 
   const values = key => [...new Set(projects.map(p => String(p[key] ?? '')).filter(Boolean))].sort()
   const districtOptions = [...new Set(projects.filter(p => !filters.province || p.province === filters.province).map(p => String(p.district)))].sort()
@@ -79,28 +142,31 @@ function App() {
     }).filter(item => item.score < 99).sort((a,b) => a.score - b.score || projectName(a.project).localeCompare(projectName(b.project))).slice(0,8).map(item => item.project)
   }, [filtered, searchTerm])
   const allProjectMatches = useMemo(() => { const term = normalizeText(searchTerm); return term ? projects.filter(project => normalizeText([projectName(project), projectCode(project), projectProvince(project), projectDistrict(project), projectChain(project), projectStatus(project), projectYear(project)].join(' ')).includes(term)).slice(0,8) : [] }, [projects, searchTerm])
-  const selected = projects.find(project => String(project.id) === String(selectedProjectId)) || null
+  const selected = projects.find(project => String(getProjectId(project)) === String(selectedProjectId)) || null
   const printPhoto = selected ? getProjectImages(selected)[0] || '' : ''
   const isProjectPanelOpen = Boolean(selected)
   useEffect(() => {
-    if (selectedProjectId !== null && !filtered.some(project => String(project.id) === String(selectedProjectId))) setSelectedProjectId(null)
-  }, [filtered, selectedProjectId])
+    if (selectedProjectId !== null && !projects.some(project => String(project.id) === String(selectedProjectId))) setSelectedProjectId(null)
+  }, [projects, selectedProjectId])
   useEffect(() => { setActivePhoto(selected?.photos?.[0] || ''); setPrintPhotoFailed(false) }, [selectedProjectId, selected])
+  useEffect(() => {
+    selectedResultRef.current?.scrollIntoView({ behavior:'smooth', block:'nearest' })
+  }, [selectedProjectId])
   useEffect(() => {
     const close = event => { if (!searchRef.current?.contains(event.target)) { setIsSearchOpen(false); setActiveSearchIndex(-1) } }
     document.addEventListener('mousedown', close)
     return () => document.removeEventListener('mousedown', close)
   }, [])
-  const totalBudget = filtered.reduce((a,p) => a + p.budget, 0)
-  const totalBenefits = filtered.reduce((a,p) => a + p.beneficiaries, 0)
+  const totalBudget = filtered.reduce((a,p) => a + (Number(p.budget) || 0), 0)
+  const totalBenefits = filtered.reduce((a,p) => a + (Number(p.beneficiaries) || 0), 0)
   const chartData = values('chain').map(chain => ({ name: chain.slice(0, 5), proyectos: filtered.filter(p => p.chain === chain).length }))
   const clearFilters = () => { setFilters({ province: '', district: '', chain: '', status: '', year: '' }); setSelectedProjectId(null) }
   const selectProject = projectId => {
     if (projectId === null || projectId === undefined || projectId === '') { if(import.meta.env.DEV) console.warn('No se puede seleccionar un proyecto sin ID'); return }
-    setSelectedProjectId(projectId)
+    setSelectedProjectId(String(projectId))
   }
   const selectProjectFromSearch = project => {
-    if (!project?.id) { console.warn('El resultado de búsqueda no tiene identificador:', project); return }
+    if (getProjectId(project) === null || getProjectId(project) === undefined || getProjectId(project) === '') { console.warn('El resultado de búsqueda no tiene identificador:', project); return }
     setFilters(current => ({
       province: !current.province || current.province === project.province ? current.province : '', district: !current.district || current.district === project.district ? current.district : '',
       chain: !current.chain || current.chain === project.chain ? current.chain : '', status: !current.status || current.status === project.status ? current.status : '', year: !current.year || String(current.year) === String(project.year) ? current.year : '',
@@ -125,15 +191,27 @@ function App() {
     if (event.key === 'Enter' && activeSearchIndex >= 0) { event.preventDefault(); selectProjectFromSearch(rankSearchResults[activeSearchIndex]) }
   }
 
+  if (currentView === 'login') return <AdminLogin onCancel={()=>setCurrentView('viewer')} onSuccess={user=>{setAdminUser(user);setCurrentView('admin')}}/>
+  if (currentView === 'admin' && adminUser) return <ProjectManagement adminUser={adminUser} isReturning={isRefreshingProjects} onLogout={()=>{clearAdminSession();setAdminUser(null);setCurrentView('viewer')}} onBack={async changed => {
+    if (isRefreshingProjects) return
+    if (changed) {
+      console.info('Refrescando proyectos desde administración')
+      setIsRefreshingProjects(true)
+      try { await loadProjects() } finally { setIsRefreshingProjects(false) }
+    }
+    setCurrentView('viewer')
+  }}/>
+
   return <div className="app-shell">
     <header className="topbar">
       <div className="brand"><img src={LOGO_URL} /><div><strong>DRA Ayacucho</strong><span>Visor de Proyectos</span></div></div>
       <div className="header-search search-container" ref={searchRef} role="combobox" aria-expanded={isSearchOpen} aria-controls="project-search-results" aria-autocomplete="list"><Search size={18}/><input value={searchTerm} onFocus={() => searchTerm && setIsSearchOpen(true)} onKeyDown={handleSearchKeyDown} onChange={e => { setSearchTerm(e.target.value); setIsSearchOpen(Boolean(e.target.value)); setActiveSearchIndex(-1) }} placeholder="Buscar por nombre, CUI o ubicación..."/>{searchTerm && <button className="search-clear" aria-label="Limpiar búsqueda" onClick={() => { setSearchTerm(''); setIsSearchOpen(false); setActiveSearchIndex(-1) }}><X size={15}/></button>}{isSearchOpen && <div id="project-search-results" className="search-results" role="listbox"><small>Resultados dentro de los filtros actuales</small>{rankSearchResults.map((project,index) => <button className={`search-result-item ${index === activeSearchIndex ? 'active' : ''}`} key={project.id} role="option" aria-selected={index === activeSearchIndex} onMouseDown={event => event.preventDefault()} onClick={() => selectProjectFromSearch(project)}><b>{safeValue(projectName(project))}</b><span>PROY-{String(projectCode(project)).padStart(4,'0')} · {safeValue(projectDistrict(project))}, {safeValue(projectProvince(project))}</span><em>{safeValue(projectChain(project))} · {safeValue(projectStatus(project))}</em></button>)}{!rankSearchResults.length && <div className="search-empty">Sin resultados en los filtros actuales{allProjectMatches.length > 0 && <button onClick={() => selectProjectFromSearch(allProjectMatches[0])}>Buscar en todos los proyectos</button>}</div>}</div>}</div>
-      <div className="header-actions"><span className="update"><i/>Datos actualizados <b>Jul 2026</b></span><button className="icon-btn"><Info size={19}/></button><button className="menu-btn" aria-label="Alternar filtros" aria-controls="filters-panel" aria-expanded={isFiltersOpen} onClick={() => setIsFiltersOpen(current => !current)}><Menu/></button><button className="user"><span>GP</span><div><b>Gestión de Proyectos</b><small>Administrador</small></div></button></div>
+      <div className="header-actions"><span className="update"><i/>Datos actualizados <b>Jul 2026</b></span><button className="icon-btn"><Info size={19}/></button><button className="menu-btn" aria-label="Alternar filtros" aria-controls="filters-panel" aria-expanded={isFiltersOpen} onClick={() => setIsFiltersOpen(current => !current)}><Menu/></button><button className="user" onClick={() => setCurrentView(adminUser?'admin':'login')} aria-label="Abrir Gestión de Proyectos"><span>GP</span><div><b>Gestión de Proyectos</b><small>{adminUser?.full_name||'Administrador'}</small></div></button></div>
     </header>
 
     <main className={`workspace ${isProjectPanelOpen ? 'sheet-open' : ''} ${basemapOpen ? 'basemap-open' : ''}`}>
-      <MapCanvas projects={filtered} selectedId={selectedProjectId} selectedProvince={filters.province} selectedDistrict={filters.district} filtersOpen={isFiltersOpen} projectPanelOpen={isProjectPanelOpen} baseMap={baseMap} mapAction={mapAction} onSelect={p => selectProject(p.id)} onSelectProvince={changeProvince} onSelectDistrict={(province, district) => changeDistrict(district, province)} />
+      <MapCanvas projects={filtered} selectedId={selectedProjectId} selectedProvince={filters.province} selectedDistrict={filters.district} filtersOpen={isFiltersOpen} projectPanelOpen={isProjectPanelOpen} baseMap={baseMap} mapAction={mapAction} onSelect={selectProject} onSelectProvince={changeProvince} onSelectDistrict={(province, district) => changeDistrict(district, province)} />
+      {projectsError && <div role="alert" style={{position:'absolute',left:'50%',top:16,zIndex:1100,transform:'translateX(-50%)',padding:'10px 14px',borderRadius:12,background:'rgba(255,255,255,.96)',color:'#8b2e2e',boxShadow:'0 8px 24px rgba(32,49,42,.16)',fontSize:11}}>{projectsError}</div>}
 
       {isFiltersOpen && <div className="filters-backdrop" onClick={() => setIsFiltersOpen(false)} aria-hidden="true"/>}
       <aside id="filters-panel" className={`left-panel panel filters-panel ${isFiltersOpen ? 'is-open' : 'is-closed'}`}>
@@ -145,7 +223,7 @@ function App() {
           <div className="filter-row"><SelectFilter label="Estado" value={filters.status} onChange={v => setFilters({...filters, status:v})} options={values('status')}/><SelectFilter label="Año" value={filters.year} onChange={v => setFilters({...filters, year:v})} options={values('year')}/></div>
           <div className="filter-result"><span><b>{filtered.length}</b> proyectos encontrados</span><button onClick={clearFilters}>Limpiar filtros</button></div>
           <div className="mini-list">
-            {filtered.slice(0,3).map(p => <button key={p.id} onClick={() => {selectProject(p.id); if (window.innerWidth < 768) setIsFiltersOpen(false)}} className={String(selectedProjectId) === String(p.id) ? 'selected':''}><span className={`status-dot ${p.status === 'Finalizado' ? 'done':''}`}/><div><b>{p.name}</b><small><MapPin size={12}/>{p.district} · {p.province}</small></div><ChevronRight size={16}/></button>)}
+            {filtered.map(p => { const isSelected=String(selectedProjectId)===String(p.id); return <button ref={isSelected?selectedResultRef:null} key={p.id} onClick={() => {selectProject(p.id); if (window.innerWidth < 768) setIsFiltersOpen(false)}} className={isSelected?'selected':''}><span className={`status-dot ${p.status === 'Finalizado' ? 'done':''}`}/><div><b>{p.name}</b><small><MapPin size={12}/>{p.district} · {p.province}</small></div><ChevronRight size={16}/></button> })}
           </div>
         </div>
       </aside>
