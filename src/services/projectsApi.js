@@ -84,16 +84,22 @@ export function deleteProjectPhoto(projectId, photoId) {
 
 export function projectsToFeatureCollection(projects) {
   if (!Array.isArray(projects)) throw new TypeError('projects debe ser una lista')
-  const features = projects.map(project => {
-    const latitude = Number(project.latitud)
-    const longitude = Number(project.longitud)
-    if (project.latitud === null || project.longitud === null || !Number.isFinite(latitude) || !Number.isFinite(longitude) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
-      console.warn('Proyecto sin coordenadas cartográficas:', project.id)
-    }
-    return {
+  const features = projects.flatMap(project => {
+    const locations = Array.isArray(project.locations) && project.locations.length
+      ? project.locations
+      : [{ id:null, latitude:project.latitud, longitude:project.longitud, sort_order:0 }]
+    const validLocations = locations.filter(location => {
+      const latitude = Number(location.latitude), longitude = Number(location.longitude)
+      return location.latitude !== null && location.longitude !== null && Number.isFinite(latitude) && Number.isFinite(longitude) && latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180
+    })
+    if (!validLocations.length) console.warn('Proyecto sin coordenadas cartográficas:', project.id_proyecto || project.id)
+    return validLocations.map(location => ({
       type: 'Feature',
       properties: {
         id: project.id,
+        location_id: location.id,
+        id_proyecto: project.id_proyecto,
+        __project_key: String(project.id_proyecto || '').trim(),
         nombre_proyecto: project.nombre_proyecto,
         provincia: project.provincia,
         distrito: project.distrito,
@@ -105,10 +111,8 @@ export function projectsToFeatureCollection(projects) {
         descripcion: project.descripcion,
         photos: Array.isArray(project.photos) ? [...project.photos].sort((a,b) => Number(b.is_primary)-Number(a.is_primary) || a.sort_order-b.sort_order).map(photo => resolveApiAssetUrl(photo.url)) : [],
       },
-      geometry: project.latitud === null || project.longitud === null || !Number.isFinite(latitude) || !Number.isFinite(longitude) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180
-        ? null
-        : { type: 'Point', coordinates: [longitude, latitude] },
-    }
+      geometry: { type: 'Point', coordinates: [Number(location.longitude), Number(location.latitude)] },
+    }))
   })
   return { type: 'FeatureCollection', features }
 }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import { createProjectLocationIndex } from "../utils/uniqueProjects";
 
 const BASE_MAPS = {
   claro: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
@@ -33,7 +34,7 @@ const LAYER_IDS = {
   provincesHalo: "provinces-halo", districtsFill: "districts-fill",
   districtsHalo: "districts-halo", districtsLine: "districts-line",
   clusters: "project-clusters", clusterCount: "project-cluster-count",
-  points: "project-points", selected: "selected-project-ring",
+  points: "project-points", selected: "selected-project-ring", selectedLocation: "selected-location-ring",
 };
 const SOURCE = SOURCE_IDS;
 const LAYER = LAYER_IDS;
@@ -177,9 +178,9 @@ function addTerritorialLayers(map, provinces, districts) {
 }
 
 function addProjectLayers(map, data) {
-  if (!map.getSource(SOURCE.projects)) runMapOperation(SOURCE.projects, () => map.addSource(SOURCE.projects, { type: "geojson", data, cluster: true, clusterMaxZoom: 12, clusterRadius: 48, generateId: true }));
+  if (!map.getSource(SOURCE.projects)) runMapOperation(SOURCE.projects, () => map.addSource(SOURCE.projects, { type: "geojson", data, cluster: true, clusterMaxZoom: 13, clusterRadius: 55, generateId: true }));
   if (!map.getLayer(LAYER.clusters)) runMapOperation(LAYER.clusters, () => map.addLayer({ id: LAYER.clusters, type: "circle", source: SOURCE.projects, filter: ["has", "point_count"], paint: {
-    "circle-color": "#0f5132", "circle-radius": ["case", ["boolean", ["feature-state", "hover"], false], ["step", ["get", "point_count"], 22, 10, 27, 30, 33], ["step", ["get", "point_count"], 19, 10, 24, 30, 30]],
+    "circle-color": "#0f5132", "circle-radius": ["step", ["get", "point_count"], 15, 10, 18, 25, 21, 50, 24],
     "circle-stroke-width": 3, "circle-stroke-color": "#ffffff",
   } }));
   if (styleSupportsGlyphs(map)) {
@@ -190,9 +191,10 @@ function addProjectLayers(map, data) {
     console.warn("El mapa base no define glyphs; se muestran clústeres sin etiqueta.");
   }
   if (!map.getLayer(LAYER.points)) runMapOperation(LAYER.points, () => map.addLayer({ id: LAYER.points, type: "circle", source: SOURCE.projects, filter: ["!", ["has", "point_count"]], paint: {
-    "circle-radius": ["case", ["boolean", ["feature-state", "hover"], false], 11, 8.5], "circle-color": ["match", ["get", "estado"], "Planificado", "#d99a2b", "Finalizado", "#8aa7b3", "#1f9d68"], "circle-stroke-width": 2.5, "circle-stroke-color": "#ffffff",
+    "circle-radius": ["interpolate", ["linear"], ["zoom"], 7, 4, 10, 5, 13, 7, 16, 9], "circle-color": ["match", ["get", "estado"], "Planificado", "#d99a2b", "Finalizado", "#8aa7b3", "#169B62"], "circle-stroke-width": 2, "circle-stroke-color": "#ffffff", "circle-opacity": 0.9,
   } }));
-  if (!map.getLayer(LAYER.selected)) runMapOperation(LAYER.selected, () => map.addLayer({ id: LAYER.selected, type: "circle", source: SOURCE.projects, filter: ["==", ["to-string", ["get", "id"]], ""], paint: { "circle-radius": 14, "circle-color": "rgba(255,255,255,0)", "circle-stroke-width": 3, "circle-stroke-color": "#0f5132" } }));
+  if (!map.getLayer(LAYER.selected)) runMapOperation(LAYER.selected, () => map.addLayer({ id: LAYER.selected, type: "circle", source: SOURCE.projects, filter: ["all", ["!", ["has", "point_count"]], ["==", ["get", "__project_key"], ""]], paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 7, 7, 10, 8, 13, 10, 16, 12], "circle-color": "rgba(255,255,255,0)", "circle-stroke-width": 1.5, "circle-stroke-opacity":0.65, "circle-stroke-color": "#0f5132" } }));
+  if (!map.getLayer(LAYER.selectedLocation)) runMapOperation(LAYER.selectedLocation, () => map.addLayer({ id:LAYER.selectedLocation, type:"circle", source:SOURCE.projects, filter:["all", ["!", ["has", "point_count"]], ["==", ["get", "__location_key"], ""]], paint:{ "circle-radius":["interpolate", ["linear"], ["zoom"], 7, 9, 10, 10, 13, 12, 16, 14], "circle-color":"rgba(255,255,255,0)", "circle-stroke-width":3, "circle-stroke-color":"#0b4d31" } }));
 }
 
 export function fitMapToGeometry(map, geometry, options = {}) {
@@ -201,12 +203,18 @@ export function fitMapToGeometry(map, geometry, options = {}) {
   map.fitBounds(bounds, { padding: 60, maxZoom: 12, duration: 850, ...options });
 }
 
-export function selectProject(map, feature, projects, onSelect) {
-  const projectId = feature?.properties?.id;
-  const project = projects.find(({ id }) => String(id) === String(projectId));
-  console.info("Feature seleccionado:", feature);
-  if (project) onSelect?.(String(project.id));
-  if (feature?.geometry?.type === "Point") map.easeTo({ center: feature.geometry.coordinates, zoom: Math.max(map.getZoom(), 13), duration: 700 });
+export function selectProject(map, feature, onSelect) {
+  const projectKey = feature?.properties?.__project_key;
+  if (projectKey) onSelect?.(projectKey, feature);
+  if (feature?.geometry?.type === "Point") map.easeTo({ center:feature.geometry.coordinates, zoom:Math.max(map.getZoom(), 13), duration:700 });
+}
+
+function focusLogicalProject(map, locationsByProject, projectKey, options = {}) {
+  const features = locationsByProject.get(projectKey) || []
+  const bounds = getGeoJSONBounds({ type:"FeatureCollection", features })
+  if (!bounds) return
+  if (features.length === 1) map.easeTo({ center:features[0].geometry.coordinates, zoom:Math.max(map.getZoom(), 13), duration:700, ...options })
+  else map.fitBounds(bounds, { padding:60, maxZoom:12, duration:850, ...options })
 }
 
 export function changeBaseMap(map, style = BASE_MAPS.claro) {
@@ -214,7 +222,7 @@ export function changeBaseMap(map, style = BASE_MAPS.claro) {
   try { map.setStyle(style); return true; } catch (error) { console.error("No se pudo cambiar el mapa base:", error); return false; }
 }
 
-export default function MapCanvas({ projects, selectedId, onSelect, selectedProvince = "", selectedDistrict = "", onSelectProvince, onSelectDistrict, filtersOpen, projectPanelOpen, baseMap = "claro", mapAction }) {
+export default function MapCanvas({ projects, selectedId, selectedLocationKey, onSelect, selectedProvince = "", selectedDistrict = "", onSelectProvince, onSelectDistrict, filtersOpen, projectPanelOpen, baseMap = "claro", mapAction }) {
   const mapContainer = useRef(null);
   const mapRef = useRef(null);
   const mapReadyRef = useRef(false);
@@ -224,7 +232,11 @@ export default function MapCanvas({ projects, selectedId, onSelect, selectedProv
   const selectedProvinceRef = useRef(selectedProvince);
   const selectedDistrictRef = useRef(selectedDistrict);
   const projectsRef = useRef(projects);
+  const locationsByProjectRef = useRef(new globalThis.Map());
+  const locationsByKeyRef = useRef(new globalThis.Map());
   const selectedIdRef = useRef(selectedId);
+  const selectedLocationKeyRef = useRef(selectedLocationKey);
+  const hoveredProjectRef = useRef(null);
   const onSelectRef = useRef(onSelect);
   const callbacksRef = useRef({ onSelectProvince, onSelectDistrict });
   const restorePromiseRef = useRef(null);
@@ -336,13 +348,15 @@ export default function MapCanvas({ projects, selectedId, onSelect, selectedProv
       const projectSource = map.getSource(SOURCE.projects);
       if (projectSource) projectSource.setData(projectsDataRef.current);
       applyTerritorialSelection(map);
-      if (map.getLayer(LAYER.selected)) map.setFilter(LAYER.selected, ["==", ["to-string", ["get", "id"]], String(selectedIdRef.current ?? "")]);
-      [LAYER.provincesFill, LAYER.provincesHalo, LAYER.provincesLine, LAYER.districtsFill, LAYER.districtsHalo, LAYER.districtsLine, LAYER.clusters, LAYER.clusterCount, LAYER.points, LAYER.selected].forEach((id) => { if (map.getLayer(id)) map.moveLayer(id); });
+      if (map.getLayer(LAYER.selected)) map.setFilter(LAYER.selected, ["all", ["!", ["has", "point_count"]], ["==", ["get", "__project_key"], String(selectedIdRef.current ?? "")]]);
+      if (map.getLayer(LAYER.selectedLocation)) map.setFilter(LAYER.selectedLocation, ["all", ["!", ["has", "point_count"]], ["==", ["get", "__location_key"], String(selectedLocationKeyRef.current ?? "")]]);
+      [LAYER.provincesFill, LAYER.provincesHalo, LAYER.provincesLine, LAYER.districtsFill, LAYER.districtsHalo, LAYER.districtsLine, LAYER.clusters, LAYER.clusterCount, LAYER.points, LAYER.selected, LAYER.selectedLocation].forEach((id) => { if (map.getLayer(id)) map.moveLayer(id); });
       const restored = {
         provincesSource: Boolean(map.getSource(SOURCE.provinces)), districtsSource: Boolean(map.getSource(SOURCE.districts)), projectsSource: Boolean(map.getSource(SOURCE.projects)),
         provincesFill: Boolean(map.getLayer(LAYER.provincesFill)), provincesLine: Boolean(map.getLayer(LAYER.provincesLine)),
         districtsFill: Boolean(map.getLayer(LAYER.districtsFill)), districtsLine: Boolean(map.getLayer(LAYER.districtsLine)),
         projectClusters: Boolean(map.getLayer(LAYER.clusters)), projectPoints: Boolean(map.getLayer(LAYER.points)),
+        selectedProject: Boolean(map.getLayer(LAYER.selected)), selectedLocation: Boolean(map.getLayer(LAYER.selectedLocation)),
       };
       console.info("Estado de capas restauradas", restored);
       console.info("project-cluster-count (opcional):", Boolean(map.getLayer(LAYER.clusterCount)));
@@ -367,7 +381,7 @@ export default function MapCanvas({ projects, selectedId, onSelect, selectedProv
       map.easeTo({ center: feature.geometry.coordinates, zoom });
     } catch (error) { console.error("No se pudo expandir el clúster:", error); }
   };
-  const handleProjectClick = (event) => { const map = mapRef.current; if (map && event.features?.[0]) selectProject(map, event.features[0], projectsRef.current, onSelectRef.current); };
+  const handleProjectClick = (event) => { const map = mapRef.current; if (map && event.features?.[0]) selectProject(map, event.features[0], onSelectRef.current); };
   const clickContainsProject = (event) => {
     const map = mapRef.current;
     if (!map || !event?.point) return false;
@@ -377,12 +391,25 @@ export default function MapCanvas({ projects, selectedId, onSelect, selectedProv
   const handleProvinceClick = (event) => { if (!clickContainsProject(event) && event.features?.[0]) callbacksRef.current.onSelectProvince?.(getProvinceName(event.features[0])); };
   const handleDistrictClick = (event) => { if (!clickContainsProject(event) && event.features?.[0]) callbacksRef.current.onSelectDistrict?.(getDistrictProvinceName(event.features[0]), getDistrictName(event.features[0])); };
   const handlePointerEnter = () => { if (mapRef.current) mapRef.current.getCanvas().style.cursor = "pointer"; };
-  const handlePointerLeave = () => { if (mapRef.current) mapRef.current.getCanvas().style.cursor = ""; };
+  const handlePointerLeave = () => {
+    const map = mapRef.current;
+    if (map && hoveredProjectRef.current !== null) map.setFeatureState({ source:SOURCE.projects, id:hoveredProjectRef.current }, { hover:false });
+    hoveredProjectRef.current = null;
+    if (map) map.getCanvas().style.cursor = "";
+  };
+  const handleProjectMove = event => {
+    const map = mapRef.current, featureId = event.features?.[0]?.id;
+    if (!map || featureId === undefined || featureId === null || hoveredProjectRef.current === featureId) return;
+    if (hoveredProjectRef.current !== null) map.setFeatureState({ source:SOURCE.projects, id:hoveredProjectRef.current }, { hover:false });
+    hoveredProjectRef.current = featureId;
+    map.setFeatureState({ source:SOURCE.projects, id:featureId }, { hover:true });
+  };
 
   const bindLayerInteractions = (map) => {
     [["click", LAYER.clusters, handleClusterClick], ["click", LAYER.points, handleProjectClick], ["click", LAYER.provincesFill, handleProvinceClick], ["click", LAYER.districtsFill, handleDistrictClick]].forEach(([event, layer, handler]) => {
       map.off(event, layer, handler); map.on(event, layer, handler);
     });
+    map.off("mousemove", LAYER.points, handleProjectMove); map.on("mousemove", LAYER.points, handleProjectMove);
     [LAYER.clusters, LAYER.points, LAYER.provincesFill, LAYER.districtsFill].forEach((layer) => {
       map.off("mouseenter", layer, handlePointerEnter); map.off("mouseleave", layer, handlePointerLeave);
       map.on("mouseenter", layer, handlePointerEnter); map.on("mouseleave", layer, handlePointerLeave);
@@ -392,9 +419,11 @@ export default function MapCanvas({ projects, selectedId, onSelect, selectedProv
   useEffect(() => {
     projectsRef.current = projects;
     projectsDataRef.current = featureCollectionFromProjects(projects);
-    console.info("Proyectos visibles:", projectsDataRef.current.features.length);
+    locationsByProjectRef.current = createProjectLocationIndex(projectsDataRef.current.features);
+    locationsByKeyRef.current = new globalThis.Map(projectsDataRef.current.features.map(feature => [feature.properties?.__location_key, feature]));
   }, [projects]);
-  useEffect(() => { selectedIdRef.current = selectedId; console.info("Proyecto seleccionado:", selectedId); }, [selectedId]);
+  useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
+  useEffect(() => { selectedLocationKeyRef.current = selectedLocationKey; }, [selectedLocationKey]);
   useEffect(() => { onSelectRef.current = onSelect; }, [onSelect]);
   useEffect(() => { callbacksRef.current = { onSelectProvince, onSelectDistrict }; }, [onSelectProvince, onSelectDistrict]);
 
@@ -464,9 +493,16 @@ export default function MapCanvas({ projects, selectedId, onSelect, selectedProv
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReadyRef.current || !canUseStyle(map) || !map.getLayer(LAYER.selected)) return;
-    try { map.setFilter(LAYER.selected, ["==", ["to-string", ["get", "id"]], String(selectedId ?? "")]); }
+    try { map.setFilter(LAYER.selected, ["all", ["!", ["has", "point_count"]], ["==", ["get", "__project_key"], String(selectedId ?? "")]]); }
     catch (error) { console.error("No se pudo restaurar el proyecto seleccionado:", error); }
   }, [selectedId]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReadyRef.current || !canUseStyle(map) || !map.getLayer(LAYER.selectedLocation)) return;
+    try { map.setFilter(LAYER.selectedLocation, ["all", ["!", ["has", "point_count"]], ["==", ["get", "__location_key"], String(selectedLocationKey ?? "")]]); }
+    catch (error) { console.error("No se pudo restaurar la ubicación seleccionada:", error); }
+  }, [selectedLocationKey]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -487,10 +523,11 @@ export default function MapCanvas({ projects, selectedId, onSelect, selectedProv
     if (mapAction.type === "zoomOut") map.zoomOut({ duration: 300 });
     if (mapAction.type === "locate") focusSelectedTerritory(map);
     if (mapAction.type === "selected" && selectedId && projectsDataRef.current) {
-      const feature = projectsDataRef.current.features.find((item) => String(item.properties?.id) === String(selectedId));
-      if (feature?.geometry?.type === "Point") map.easeTo({ center: feature.geometry.coordinates, zoom: Math.max(map.getZoom(), 13), duration: 700 });
+      const location = selectedLocationKey ? locationsByKeyRef.current.get(selectedLocationKey) : null;
+      if (location?.geometry?.type === "Point") map.easeTo({ center:location.geometry.coordinates, zoom:Math.max(map.getZoom(), 13), duration:700 });
+      else focusLogicalProject(map, locationsByProjectRef.current, selectedId);
     }
-  }, [mapAction, selectedId]);
+  }, [mapAction, selectedId, selectedLocationKey]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => mapRef.current?.resize(), 240);
@@ -502,15 +539,13 @@ export default function MapCanvas({ projects, selectedId, onSelect, selectedProv
       const map = mapRef.current;
       map?.resize();
       if (!map || !projectPanelOpen || !selectedId || !projectsDataRef.current) return;
-      const feature = projectsDataRef.current.features.find((item) => String(item.properties?.id) === String(selectedId));
-      if (feature?.geometry?.type !== "Point") return;
       const mobile = window.innerWidth < 768;
-      map.easeTo({ center: feature.geometry.coordinates, zoom: Math.max(map.getZoom(), 13), duration: 700, offset: mobile
-        ? [0, -110]
-        : [filtersOpen ? 20 : -150, 0] });
+      const location = selectedLocationKey ? locationsByKeyRef.current.get(selectedLocationKey) : null;
+      if (location?.geometry?.type === "Point") map.easeTo({ center:location.geometry.coordinates, zoom:Math.max(map.getZoom(), 13), duration:700, offset:mobile ? [0,-110] : [filtersOpen ? 20 : -150,0] });
+      else focusLogicalProject(map, locationsByProjectRef.current, selectedId, { offset: mobile ? [0, -110] : [filtersOpen ? 20 : -150, 0] });
     }, 260);
     return () => window.clearTimeout(timer);
-  }, [projectPanelOpen, selectedId, filtersOpen]);
+  }, [projectPanelOpen, selectedId, selectedLocationKey, filtersOpen]);
 
   return <div className="map-canvas" aria-label="Mapa interactivo de proyectos de Ayacucho">
     <div ref={mapContainer} style={{ position: "absolute", inset: 0 }} />

@@ -8,6 +8,7 @@ import { Button } from './components/ui/button'
 import { fetchProjectsFromApi, projectsToFeatureCollection } from './services/projectsApi'
 import { getCurrentAdmin, logout as clearAdminSession } from './services/authApi'
 import LOGO_URL from '../assets/img/logo_draa.jpg'
+import { getLocationCommunity, getLocationCoordinates, getLocationDistrict, getLocationProvince, getUniqueProjects, prepareProjectFeatures } from './utils/uniqueProjects'
 
 const PROJECTS_URL = `${import.meta.env.BASE_URL}data/proyectos.geojson`
 
@@ -17,7 +18,7 @@ const normalizeText = value => String(value ?? '').normalize('NFD').replace(/[\u
 const safeValue = value => value === null || value === undefined || value === '' ? 'No disponible' : value
 const propsOf = project => project?.properties || project || {}
 const getProjectId = project => propsOf(project).id ?? propsOf(project).codigo_proyecto ?? null
-const getProjectCode = project => propsOf(project).cui ?? propsOf(project).codigo ?? propsOf(project).codigo_proyecto ?? getProjectId(project)
+const getProjectCode = project => propsOf(project).id_proyecto ?? propsOf(project).id_proy ?? propsOf(project).cui ?? propsOf(project).codigo ?? propsOf(project).codigo_proyecto ?? getProjectId(project)
 const getProjectName = project => propsOf(project).name ?? propsOf(project).nombre ?? propsOf(project).nombre_proyecto ?? propsOf(project).proyecto ?? propsOf(project).titulo ?? ''
 const getProjectProvince = project => propsOf(project).province ?? propsOf(project).provincia ?? ''
 const getProjectDistrict = project => propsOf(project).district ?? propsOf(project).distrito ?? ''
@@ -33,6 +34,7 @@ const normalizeProgress = value => { if(value===null||value===undefined||value==
 const normalizeStatus = value => { const status=normalizeText(value); if(status==='en ejecucion') return 'En ejecución'; if(status==='planificado') return 'Planificado'; if(status==='finalizado') return 'Finalizado'; return value || 'No disponible' }
 const sanitizePrintTitle = value => String(value ?? '').replace(/[\\/:*?"<>|]+/g,' ').replace(/\s+/g,' ').trim()
 const projectName = getProjectName, projectCode = getProjectCode, projectProvince = getProjectProvince, projectDistrict = getProjectDistrict, projectChain = getProjectChain, projectStatus = getProjectStatus, projectYear = getProjectYear
+const projectSearchText = project => [projectCode(project), projectName(project), projectChain(project), projectStatus(project), projectYear(project), ...(project.locations || [project]).flatMap(location => [projectProvince(location), projectDistrict(location)])].join(' ')
 
 function SelectFilter({ label, value, onChange, options }) {
   return <label className="filter-field"><span>{label}</span><select value={value} onChange={e => onChange(e.target.value)}><option value="">Todos</option>{options.map(o => <option key={o}>{o}</option>)}</select></label>
@@ -51,6 +53,7 @@ function App() {
   const [filters, setFilters] = useState({ province: '', district: '', chain: '', status: '', year: '' })
   const [isFiltersOpen, setIsFiltersOpen] = useState(true)
   const [selectedProjectId, setSelectedProjectId] = useState(null)
+  const [selectedLocation, setSelectedLocation] = useState(null)
   const [basemapOpen, setBasemapOpen] = useState(false)
   const [baseMap, setBaseMap] = useState('claro')
   const [mapAction, setMapAction] = useState(null)
@@ -72,31 +75,47 @@ function App() {
     const controller = new AbortController()
     const requestId = projectsRequestRef.current.id + 1
     projectsRequestRef.current = { id: requestId, controller }
-    const mapFeatures = features => features.map(f => ({
+    const mapFeatures = features => {
+      const prepared = prepareProjectFeatures(features)
+      return prepared.features.map(f => ({
         id:getProjectId(f), code:getProjectCode(f), name:getProjectName(f), province:getProjectProvince(f), district:getProjectDistrict(f), chain:getProjectChain(f),
         status:normalizeStatus(getProjectStatus(f)), budget:getProjectInvestment(f), beneficiaries:getProjectBeneficiaries(f), execution:normalizeProgress(getProjectProgress(f)),
         year:getProjectYear(f), community:f.properties?.comunidad, description:getProjectDescription(f), photos:getProjectImages(f),
         coordinates:f.geometry?.type === 'Point' && Array.isArray(f.geometry.coordinates) ? f.geometry.coordinates : null,
-        feature:f
-      })).filter(project => { if(project.id===null){ if(import.meta.env.DEV) console.warn('Proyecto sin ID:',project); return false } return true })
+        projectKey:f.properties.__project_key, feature:f
+      }))
+    }
     const commit = (nextProjects, source) => {
       if (controller.signal.aborted || projectsRequestRef.current.id !== requestId) return
       setProjects(nextProjects); setProjectsError('')
-      console.info('Proyectos recibidos:', nextProjects.length)
-      console.info('Fuente:', source)
+      const groups = getUniqueProjects(nextProjects.map(project => project.feature))
+      console.info('Features espaciales:', nextProjects.length)
+      console.info('Proyectos únicos:', groups.length)
+      console.info('Proyectos multiubicación:', groups.filter(group => group.locations.length > 1).length, 'Fuente:', source)
     }
     try {
       const apiProjects = await fetchProjectsFromApi({ signal:controller.signal })
-      commit(mapFeatures(projectsToFeatureCollection(apiProjects).features), 'api')
+      let features = projectsToFeatureCollection(apiProjects).features
+      try {
+        const response = await fetch(PROJECTS_URL, { signal:controller.signal })
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
+        const geojson = await response.json()
+        const apiProperties = new globalThis.Map(features.map(feature => [String(feature.properties.id_proyecto).trim(), feature.properties]))
+        features = geojson.features.map(feature => {
+          const key = String(feature.properties?.id_proyecto ?? feature.properties?.id_proy ?? '').trim()
+          return { ...feature, properties:{ ...(apiProperties.get(key)||{}), ...feature.properties, id_proyecto:key } }
+        })
+      } catch (spatialError) { console.warn('No se pudo enriquecer la API con datos territoriales por ubicación.', spatialError) }
+      commit(mapFeatures(features), 'api+geojson')
       return 'api'
     } catch (apiError) {
       if (controller.signal.aborted) return null
-      console.warn('API no disponible. Usando respaldo GeoJSON.', apiError)
+      console.warn('API no disponible. Usando GeoJSON como respaldo.', apiError)
       try {
         const response = await fetch(PROJECTS_URL, { signal:controller.signal })
         if (!response.ok) throw new Error(`GeoJSON de proyectos: ${response.status} ${response.statusText}`)
         const geojson = await response.json()
-        if (geojson?.type !== 'FeatureCollection' || !Array.isArray(geojson.features)) throw new Error('El respaldo de proyectos no es un FeatureCollection válido')
+        if (geojson?.type !== 'FeatureCollection' || !Array.isArray(geojson.features)) throw new Error('El GeoJSON de proyectos no es un FeatureCollection válido')
         commit(mapFeatures(geojson.features), 'geojson')
         return 'geojson'
       } catch (fallbackError) {
@@ -130,28 +149,53 @@ function App() {
   const resolveValue = (key, value) => projects.find(project => normalizeText(project[key]) === normalizeText(value))?.[key] || value
   const changeProvince = value => setFilters(current => { const province = value ? resolveValue('province', value) : ''; return { ...current, province, district: current.district && projects.some(p => p.province === province && p.district === current.district) ? current.district : '' } })
   const changeDistrict = (value, provinceValue = '') => setFilters(current => { const requestedProvince = provinceValue ? resolveValue('province', provinceValue) : current.province; const project = projects.find(p => normalizeText(p.district) === normalizeText(value) && (!requestedProvince || normalizeText(p.province) === normalizeText(requestedProvince))); return { ...current, province: project?.province || requestedProvince, district: project?.district || value } })
-  const filtered = useMemo(() => projects.filter(p => Object.entries(filters).every(([k,v]) => !v || String(p[k]) === v)), [projects, filters])
+  const filteredLocations = useMemo(() => projects.filter(p => Object.entries(filters).every(([k,v]) => !v || String(p[k]) === v)), [projects, filters])
+  const toLogicalProjects = (groups, locations) => {
+    const byFeature = new globalThis.Map(locations.map(project => [project.feature, project]))
+    return groups.map(group => {
+    const matches = group.locations.map(feature => byFeature.get(feature)).filter(Boolean)
+    const photos = [...new Set(matches.flatMap(project => project.photos || []))]
+    return { ...matches[0], id:group.projectKey, projectKey:group.projectKey, locations:matches, locationCount:matches.length, photos }
+  })}
+  const uniqueProjects = useMemo(() => toLogicalProjects(getUniqueProjects(projects.map(project => project.feature)), projects), [projects])
+  const filtered = useMemo(() => toLogicalProjects(getUniqueProjects(filteredLocations.map(project => project.feature)), filteredLocations), [filteredLocations])
   const rankSearchResults = useMemo(() => {
     const term = normalizeText(searchTerm)
     if (!term) return []
     return filtered.map(project => {
       const name = normalizeText(projectName(project)); const code = normalizeText(projectCode(project))
-      const index = normalizeText([projectName(project), projectCode(project), projectProvince(project), projectDistrict(project), projectChain(project), projectStatus(project), projectYear(project)].join(' '))
+      const index = normalizeText(projectSearchText(project))
       const score = code === term ? 0 : name.startsWith(term) ? 1 : name.includes(term) ? 2 : index.includes(term) ? 3 : 99
       return { project, score }
     }).filter(item => item.score < 99).sort((a,b) => a.score - b.score || projectName(a.project).localeCompare(projectName(b.project))).slice(0,8).map(item => item.project)
   }, [filtered, searchTerm])
-  const allProjectMatches = useMemo(() => { const term = normalizeText(searchTerm); return term ? projects.filter(project => normalizeText([projectName(project), projectCode(project), projectProvince(project), projectDistrict(project), projectChain(project), projectStatus(project), projectYear(project)].join(' ')).includes(term)).slice(0,8) : [] }, [projects, searchTerm])
-  const selected = projects.find(project => String(getProjectId(project)) === String(selectedProjectId)) || null
+  const allProjectMatches = useMemo(() => { const term = normalizeText(searchTerm); return term ? uniqueProjects.filter(project => normalizeText(projectSearchText(project)).includes(term)).slice(0,8) : [] }, [uniqueProjects, searchTerm])
+  const uniqueProjectsById = useMemo(() => new globalThis.Map(uniqueProjects.map(project => [project.projectKey, project])), [uniqueProjects])
+  const selected = uniqueProjectsById.get(selectedProjectId) || null
+  const summarizedLocationValue = (getter, prompt = 'Varias ubicaciones') => {
+    if (selectedLocation) return getter(selectedLocation)
+    const values = [...new Set((selected?.locations || []).map(location => getter(location.feature)).filter(value => value !== null && value !== undefined && String(value).trim()))]
+    return values.length === 1 ? values[0] : selected?.locationCount > 1 ? prompt : values[0]
+  }
+  const selectedProvince = summarizedLocationValue(getLocationProvince)
+  const selectedDistrict = summarizedLocationValue(getLocationDistrict)
+  const selectedCommunity = summarizedLocationValue(getLocationCommunity, 'Seleccione un punto del mapa')
+  const selectedCoordinates = getLocationCoordinates(selectedLocation)
   const printPhoto = selected ? getProjectImages(selected)[0] || '' : ''
   const isProjectPanelOpen = Boolean(selected)
   useEffect(() => {
-    if (selectedProjectId !== null && !projects.some(project => String(project.id) === String(selectedProjectId))) setSelectedProjectId(null)
-  }, [projects, selectedProjectId])
+    if (selectedProjectId === null) return
+    if (!filtered.some(project => project.projectKey === selectedProjectId)) { setSelectedProjectId(null); setSelectedLocation(null); return }
+    if (selectedLocation && !filteredLocations.some(project => project.feature.properties.__location_key === selectedLocation.properties?.__location_key)) setSelectedLocation(null)
+  }, [filtered, filteredLocations, selectedLocation, selectedProjectId])
   useEffect(() => { setActivePhoto(selected?.photos?.[0] || ''); setPrintPhotoFailed(false) }, [selectedProjectId, selected])
   useEffect(() => {
     selectedResultRef.current?.scrollIntoView({ behavior:'smooth', block:'nearest' })
   }, [selectedProjectId])
+  useEffect(() => {
+    console.info('Proyecto seleccionado:', selectedProjectId)
+    console.info('Ubicación seleccionada:', { provincia:selectedProvince, distrito:selectedDistrict, comunidad:selectedCommunity, coordinates:selectedCoordinates })
+  }, [selectedProjectId, selectedLocation])
   useEffect(() => {
     const close = event => { if (!searchRef.current?.contains(event.target)) { setIsSearchOpen(false); setActiveSearchIndex(-1) } }
     document.addEventListener('mousedown', close)
@@ -160,18 +204,20 @@ function App() {
   const totalBudget = filtered.reduce((a,p) => a + (Number(p.budget) || 0), 0)
   const totalBenefits = filtered.reduce((a,p) => a + (Number(p.beneficiaries) || 0), 0)
   const chartData = values('chain').map(chain => ({ name: chain.slice(0, 5), proyectos: filtered.filter(p => p.chain === chain).length }))
-  const clearFilters = () => { setFilters({ province: '', district: '', chain: '', status: '', year: '' }); setSelectedProjectId(null) }
-  const selectProject = projectId => {
+  const clearFilters = () => { setFilters({ province: '', district: '', chain: '', status: '', year: '' }); setSelectedProjectId(null); setSelectedLocation(null) }
+  const selectProject = (projectId, location = null) => {
     if (projectId === null || projectId === undefined || projectId === '') { if(import.meta.env.DEV) console.warn('No se puede seleccionar un proyecto sin ID'); return }
     setSelectedProjectId(String(projectId))
+    setSelectedLocation(location)
   }
+  const closeProject = () => { setSelectedProjectId(null); setSelectedLocation(null) }
   const selectProjectFromSearch = project => {
     if (getProjectId(project) === null || getProjectId(project) === undefined || getProjectId(project) === '') { console.warn('El resultado de búsqueda no tiene identificador:', project); return }
     setFilters(current => ({
       province: !current.province || current.province === project.province ? current.province : '', district: !current.district || current.district === project.district ? current.district : '',
       chain: !current.chain || current.chain === project.chain ? current.chain : '', status: !current.status || current.status === project.status ? current.status : '', year: !current.year || String(current.year) === String(project.year) ? current.year : '',
     }))
-    selectProject(project.id); setSearchTerm(projectName(project)); setIsSearchOpen(false); setActiveSearchIndex(-1)
+    selectProject(project.projectKey); setSearchTerm(projectName(project)); setIsSearchOpen(false); setActiveSearchIndex(-1)
   }
   const downloadProjectSheet = () => {
     if (!selected) return
@@ -210,7 +256,7 @@ function App() {
     </header>
 
     <main className={`workspace ${isProjectPanelOpen ? 'sheet-open' : ''} ${basemapOpen ? 'basemap-open' : ''}`}>
-      <MapCanvas projects={filtered} selectedId={selectedProjectId} selectedProvince={filters.province} selectedDistrict={filters.district} filtersOpen={isFiltersOpen} projectPanelOpen={isProjectPanelOpen} baseMap={baseMap} mapAction={mapAction} onSelect={selectProject} onSelectProvince={changeProvince} onSelectDistrict={(province, district) => changeDistrict(district, province)} />
+      <MapCanvas projects={filteredLocations} selectedId={selectedProjectId} selectedLocationKey={selectedLocation?.properties?.__location_key || null} selectedProvince={filters.province} selectedDistrict={filters.district} filtersOpen={isFiltersOpen} projectPanelOpen={isProjectPanelOpen} baseMap={baseMap} mapAction={mapAction} onSelect={selectProject} onSelectProvince={changeProvince} onSelectDistrict={(province, district) => changeDistrict(district, province)} />
       {projectsError && <div role="alert" style={{position:'absolute',left:'50%',top:16,zIndex:1100,transform:'translateX(-50%)',padding:'10px 14px',borderRadius:12,background:'rgba(255,255,255,.96)',color:'#8b2e2e',boxShadow:'0 8px 24px rgba(32,49,42,.16)',fontSize:11}}>{projectsError}</div>}
 
       {isFiltersOpen && <div className="filters-backdrop" onClick={() => setIsFiltersOpen(false)} aria-hidden="true"/>}
@@ -242,16 +288,18 @@ function App() {
       <div className="layer-tools"><button onClick={() => setBasemapOpen(!basemapOpen)}><Layers3/><span>Mapas base</span></button>{basemapOpen && <div className="basemap-pop"><b>Mapa base</b><label><input type="radio" checked={baseMap === 'claro'} onChange={() => setBaseMap('claro')} name="base"/> CARTO claro</label><label><input type="radio" checked={baseMap === 'satelite'} onChange={() => setBaseMap('satelite')} name="base"/> Satélite</label><label><input type="radio" checked={baseMap === 'osm'} onChange={() => setBaseMap('osm')} name="base"/> OpenStreetMap</label></div>}</div>
       <div className="legend"><div><b>Leyenda</b><button><ChevronLeft size={14}/></button></div><span><i className="dot active"/>En ejecución</span><span><i className="dot planned"/>Planificado</span><span><i className="dot finished"/>Finalizado</span><small><i className="cluster"/> Agrupación de proyectos</small></div>
 
-      {selected && <><div className="project-panel-backdrop" onClick={() => setSelectedProjectId(null)} aria-hidden="true"/><aside id="project-sheet" role="dialog" aria-modal={window.innerWidth < 1024} aria-labelledby="project-panel-title" className="right-panel panel project-panel is-open">
-        <div className="detail-top project-panel__header"><span className="project-code">{selected.code === selected.id ? `PROY-${String(selected.id).padStart(4,'0')}` : safeValue(selected.code)}</span><div><button type="button" aria-label="Compartir proyecto"><Share2 size={17}/></button><button type="button" aria-label="Cerrar ficha" aria-controls="project-sheet" aria-expanded={isProjectPanelOpen} onClick={() => setSelectedProjectId(null)}><X/></button></div></div>
+      {selected && <><div className="project-panel-backdrop" onClick={closeProject} aria-hidden="true"/><aside id="project-sheet" role="dialog" aria-modal={window.innerWidth < 1024} aria-labelledby="project-panel-title" className="right-panel panel project-panel is-open">
+        <div className="detail-top project-panel__header"><span className="project-code">{selected.code === selected.id ? `PROY-${String(selected.id).padStart(4,'0')}` : safeValue(selected.code)}</span><div><button type="button" aria-label="Compartir proyecto"><Share2 size={17}/></button><button type="button" aria-label="Cerrar ficha" aria-controls="project-sheet" aria-expanded={isProjectPanelOpen} onClick={closeProject}><X/></button></div></div>
         <div className="detail-scroll">
           <span className={`state-pill ${selected.status === 'Finalizado' ? 'finished' : selected.status === 'Planificado' ? 'planned' : selected.status === 'En ejecución' ? '' : 'neutral'}`}><i/>{safeValue(selected.status)}</span>
           <h1 id="project-panel-title">{safeValue(selected.name)}</h1>
-          <p className="location"><MapPin size={16}/>{safeValue(selected.district)}, {safeValue(selected.province)}</p>
+          <p className="location"><MapPin size={16}/>{safeValue(selectedDistrict)}, {safeValue(selectedProvince)}</p>
+          {selected.locationCount > 1 && <p className="location"><MapPin size={16}/>Ubicaciones registradas: {selected.locationCount}</p>}
           <div className={`hero-photo ${activePhoto ? '' : 'no-photo'}`}>{activePhoto ? <img src={activePhoto} alt={`Fotografía de ${selected.name}`} onError={() => setActivePhoto('')}/> : <strong><ImageIcon/>Sin fotografías disponibles</strong>}<span><ImageIcon size={15}/>{selected.photos?.length || 0} fotos</span></div>
           <div className="thumbs">{selected.photos?.map((photo,i)=><button className={photo === activePhoto ? 'active' : ''} aria-label={`Ver fotografía ${i + 1}`} onClick={() => setActivePhoto(photo)} key={photo}><img src={photo} onError={event => { event.currentTarget.style.visibility = 'hidden' }} /></button>)}</div>
           <section className="detail-section"><h3>Avance del proyecto <b>{selected.execution === null ? 'No disponible' : `${selected.execution}%`}</b></h3><div className="progress"><i style={{width:`${selected.execution ?? 0}%`}}/></div>{selected.execution !== null && <div className="milestones"><span><CheckCircle2/>Inicio</span><span><CheckCircle2/>Ejecución</span><span className={selected.execution<100?'muted':''}><CheckCircle2/>Cierre</span></div>}</section>
-          <section className="detail-section"><h3>Información general</h3><div className="info-grid"><span><Building2/>Provincia<b>{safeValue(selected.province)}</b></span><span><MapPin/>Distrito<b>{safeValue(selected.district)}</b></span><span><Sprout/>Cadena productiva<b>{safeValue(selected.chain)}</b></span><span><CalendarDays/>Año de inicio<b>{safeValue(selected.year)}</b></span></div></section>
+          <section className="detail-section"><h3>Información de la ubicación seleccionada</h3><div className="info-grid"><span><Building2/>Provincia<b>{safeValue(selectedProvince)}</b></span><span><MapPin/>Distrito<b>{safeValue(selectedDistrict)}</b></span><span><MapPin/>Comunidad<b>{safeValue(selectedCommunity)}</b></span><span><MapPin/>Coordenadas<b>{selectedCoordinates ? `${Number(selectedCoordinates[1]).toFixed(6)}, ${Number(selectedCoordinates[0]).toFixed(6)}` : 'Seleccione un punto del mapa'}</b></span></div></section>
+          <section className="detail-section"><h3>Información general</h3><div className="info-grid"><span><Sprout/>Cadena productiva<b>{safeValue(selected.chain)}</b></span><span><CalendarDays/>Año de inicio<b>{safeValue(selected.year)}</b></span></div></section>
           <section className="numbers"><div><small>Inversión</small><b>{formatCurrencyPEN(selected.budget)}</b></div><div><small>Beneficiarios</small><b>{Number.isFinite(Number(selected.beneficiaries)) ? Number(selected.beneficiaries).toLocaleString('es-PE') : 'No disponible'}</b></div></section>
           <section className="detail-section"><h3>Descripción</h3><p>{selected.description || 'No se registró una descripción para este proyecto.'}</p></section>
           {chartData.length > 0 && <section className="detail-section chart"><h3><BarChart3/> Proyectos por cadena</h3><ResponsiveContainer width="100%" height={120}><BarChart data={chartData}><XAxis dataKey="name" axisLine={false} tickLine={false} fontSize={10}/><Tooltip/><Bar dataKey="proyectos" fill="#1c7c54" radius={[5,5,0,0]}/></BarChart></ResponsiveContainer></section>}

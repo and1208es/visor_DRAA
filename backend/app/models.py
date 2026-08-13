@@ -14,6 +14,7 @@ class Project(Base):
     __tablename__ = "proyectos"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id_proyecto: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
     nombre_proyecto: Mapped[str] = mapped_column(String(300), nullable=False)
     provincia: Mapped[str | None] = mapped_column(String(120), nullable=True)
     distrito: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -29,6 +30,20 @@ class Project(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
     photos: Mapped[list["ProjectPhoto"]] = relationship(back_populates="project", cascade="all, delete-orphan", lazy="selectin", order_by="ProjectPhoto.sort_order")
+    locations: Mapped[list["ProjectLocation"]] = relationship(back_populates="project", cascade="all, delete-orphan", lazy="selectin", order_by="ProjectLocation.sort_order")
+
+
+class ProjectLocation(Base):
+    __tablename__ = "project_locations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("proyectos.id", ondelete="CASCADE"), nullable=False, index=True)
+    latitude: Mapped[float] = mapped_column(Float, nullable=False)
+    longitude: Mapped[float] = mapped_column(Float, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    project: Mapped[Project] = relationship(back_populates="locations")
 
 
 class ProjectPhoto(Base):

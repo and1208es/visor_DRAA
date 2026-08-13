@@ -52,7 +52,11 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
 
 @router.post("", response_model=schemas.ProjectResponse, status_code=status.HTTP_201_CREATED)
 def create_project(payload: schemas.ProjectCreate, db: Session = Depends(get_db), _admin: models.User = Depends(get_current_admin)):
-    project = models.Project(**payload.model_dump())
+    values = payload.model_dump()
+    latitude, longitude = values.get("latitud"), values.get("longitud")
+    project = models.Project(**values)
+    if latitude is not None and longitude is not None:
+        project.locations.append(models.ProjectLocation(latitude=latitude, longitude=longitude, sort_order=0))
     db.add(project)
     commit_or_500(db)
     db.refresh(project)
@@ -65,6 +69,13 @@ def update_project(project_id: int, payload: schemas.ProjectUpdate, db: Session 
     project = get_active_project(project_id, db)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(project, field, value)
+    if "latitud" in payload.model_fields_set or "longitud" in payload.model_fields_set:
+        if project.latitud is not None and project.longitud is not None:
+            if project.locations:
+                project.locations[0].latitude = project.latitud
+                project.locations[0].longitude = project.longitud
+            else:
+                project.locations.append(models.ProjectLocation(latitude=project.latitud, longitude=project.longitud, sort_order=0))
     commit_or_500(db)
     db.refresh(project)
     logger.info("Proyecto %s editado por administrador %s", project.id, _admin.username)

@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ProjectBase(BaseModel):
+    id_proyecto: str = Field(min_length=1, max_length=100)
     nombre_proyecto: str = Field(min_length=1, max_length=300)
     provincia: str | None = None
     distrito: str | None = None
@@ -22,6 +23,7 @@ class ProjectCreate(ProjectBase):
 
 
 class ProjectUpdate(BaseModel):
+    id_proyecto: str | None = Field(default=None, min_length=1, max_length=100)
     nombre_proyecto: str | None = Field(default=None, min_length=1, max_length=300)
     provincia: str | None = None
     distrito: str | None = None
@@ -54,6 +56,15 @@ class ProjectPhotoUpdate(BaseModel):
     sort_order: int | None = Field(default=None, ge=0)
 
 
+class ProjectLocationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    latitude: float
+    longitude: float
+    sort_order: int
+
+
 class ProjectResponse(ProjectBase):
     model_config = ConfigDict(from_attributes=True)
 
@@ -62,6 +73,7 @@ class ProjectResponse(ProjectBase):
     created_at: datetime
     updated_at: datetime
     photos: list[ProjectPhotoResponse] = Field(default_factory=list)
+    locations: list[ProjectLocationResponse] = Field(default_factory=list)
 
 
 class LoginRequest(BaseModel):

@@ -6,7 +6,7 @@ import ProjectLocationPicker from './ProjectLocationPicker'
 
 // TODO SECURITY: El módulo administrativo debe protegerse con autenticación y autorización antes de desplegarse públicamente.
 
-const EMPTY_FORM = { nombre_proyecto:'', provincia:'', distrito:'', comunidad:'', estado:'', fecha_inicio:'', presupuesto:'', beneficiarios:'', descripcion:'', latitud:'', longitud:'' }
+const EMPTY_FORM = { id_proyecto:'', nombre_proyecto:'', provincia:'', distrito:'', comunidad:'', estado:'', fecha_inicio:'', presupuesto:'', beneficiarios:'', descripcion:'', latitud:'', longitud:'' }
 const TERRITORY_URLS = {
   provinces:`${import.meta.env.BASE_URL}data/provincias.geojson`,
   districts:`${import.meta.env.BASE_URL}data/distritos.geojson`,
@@ -17,6 +17,7 @@ const money = value => Number.isFinite(Number(value)) ? new Intl.NumberFormat('e
 
 function validate(form) {
   const errors = {}
+  if (!text(form.id_proyecto)) errors.id_proyecto = 'El ID del proyecto es obligatorio.'
   if (!text(form.nombre_proyecto)) errors.nombre_proyecto = 'El nombre es obligatorio.'
   if (!form.provincia) errors.provincia = 'Selecciona una provincia.'
   if (!form.distrito) errors.distrito = 'Selecciona un distrito.'
@@ -34,7 +35,7 @@ function payloadFromForm(form) {
   const nullableText = value => text(value) || null
   const nullableNumber = value => value === '' ? null : Number(value)
   return {
-    nombre_proyecto:text(form.nombre_proyecto), provincia:form.provincia, distrito:form.distrito,
+    id_proyecto:text(form.id_proyecto), nombre_proyecto:text(form.nombre_proyecto), provincia:form.provincia, distrito:form.distrito,
     comunidad:nullableText(form.comunidad), estado:nullableText(form.estado), fecha_inicio:nullableText(form.fecha_inicio),
     presupuesto:nullableNumber(form.presupuesto), beneficiarios:nullableNumber(form.beneficiarios), descripcion:nullableText(form.descripcion),
     latitud:nullableNumber(form.latitud), longitud:nullableNumber(form.longitud),
@@ -112,12 +113,15 @@ function ProjectForm({ project, provinces, districts, onClose, onSaved, onPhotos
     <header><div><span className="admin-eyebrow">Gestión de proyectos</span><h2 id="project-form-title">{project?'Editar proyecto':'Nuevo proyecto'}</h2></div><button type="button" onClick={onClose} aria-label="Cerrar formulario"><X/></button></header>
     <form onSubmit={submit} noValidate>
       {serverError&&<div className="admin-inline-error" role="alert">{serverError}</div>}
+      {field('id_proyecto','ID del proyecto','text',true)}
       {field('nombre_proyecto','Nombre del proyecto','text',true)}
       <div className="admin-form-grid"><label className="admin-field"><span>Provincia *</span><select value={form.provincia} onChange={event=>change('provincia',event.target.value)} aria-invalid={Boolean(errors.provincia)}><option value="">Seleccionar</option>{provinces.map(value=><option key={value}>{value}</option>)}</select>{errors.provincia&&<small>{errors.provincia}</small>}</label><label className="admin-field"><span>Distrito *</span><select value={form.distrito} disabled={!form.provincia} onChange={event=>change('distrito',event.target.value)} aria-invalid={Boolean(errors.distrito)}><option value="">Seleccionar</option>{districtOptions.map(value=><option key={value}>{value}</option>)}</select>{errors.distrito&&<small>{errors.distrito}</small>}</label></div>
       <div className="admin-form-grid">{field('comunidad','Comunidad')}<label className="admin-field"><span>Estado</span><select value={form.estado} onChange={event=>change('estado',event.target.value)}><option value="">Seleccionar</option><option>Planificado</option><option>En ejecución</option><option>Finalizado</option></select></label></div>
       <div className="admin-form-grid">{field('fecha_inicio','Fecha de inicio','date')}{field('presupuesto','Presupuesto','number')}</div>
       <div className="admin-form-grid">{field('beneficiarios','Beneficiarios','number')}{field('latitud','Latitud','number')}</div>
       <div className="admin-form-grid">{field('longitud','Longitud','number')}<div className="admin-map-placeholder"><button type="button" onClick={()=>setLocationPickerOpen(true)}><MapPin/>Seleccionar ubicación en mapa</button><small>También puedes escribir las coordenadas manualmente.</small></div></div>
+      {project&&<p>Ubicaciones: {project.locations?.length || 0}</p>}
+      {project&&<p>TODO: Gestión múltiple de ubicaciones.</p>}
       <label className="admin-field"><span>Descripción</span><textarea rows="5" value={form.descripcion} onChange={event=>change('descripcion',event.target.value)}/></label>
       {!project&&<section className="admin-photos"><div className="admin-photos-heading"><div><h3>Fotografías</h3><p>Se subirán después de crear el proyecto. Hasta 8 imágenes JPG, PNG o WebP.</p></div><label className="admin-photo-add"><ImagePlus/>Agregar fotografías<input type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={choosePendingPhotos}/></label></div>{pendingPhotos.length>0&&<div className="admin-photo-pending"><strong>Listas para subir</strong><div>{pendingPhotos.map((item,index)=><article key={`${item.file.name}-${index}`}><img src={item.preview}/><span>{item.file.name}<small>{(item.file.size/1024/1024).toFixed(2)} MB</small></span><button type="button" disabled={saving} onClick={()=>removePendingPhoto(index)} aria-label={`Quitar ${item.file.name}`}><X/></button></article>)}</div></div>}</section>}
       {project&&<PhotoManager projectId={project.id} onChanged={onPhotosChanged}/>} 
@@ -132,7 +136,7 @@ export default function ProjectManagement({ onBack, onLogout, adminUser, isRetur
   const [territories,setTerritories] = useState({provinces:[],districts:[]})
   const load = async signal => { setLoading(true);setError('');try{setProjects(await fetchProjectsFromApi({signal}))}catch(err){if(err.name!=='AbortError')setError('No se pudo conectar con el servidor de gestión.')}finally{if(!signal?.aborted)setLoading(false)} }
   useEffect(()=>{const controller=new AbortController();load(controller.signal);Promise.all(Object.values(TERRITORY_URLS).map(url=>fetch(url,{signal:controller.signal}).then(response=>{if(!response.ok)throw new Error(String(response.status));return response.json()}))).then(([provinces,districts])=>setTerritories({provinces:[...new Set(provinces.features.map(item=>territoryLabel(item.properties?.provincia)).filter(Boolean))].sort(),districts:districts.features.map(item=>({province:territoryLabel(item.properties?.provincia),name:territoryLabel(item.properties?.distrito)})).filter(item=>item.province&&item.name)})).catch(err=>{if(err.name!=='AbortError')console.error('No se cargaron los selectores territoriales:',err)});return()=>controller.abort()},[])
-  const filtered=useMemo(()=>{const term=query.toLocaleLowerCase('es');return projects.filter(project=>[project.id,project.nombre_proyecto,project.provincia,project.distrito,project.estado].some(value=>String(value??'').toLocaleLowerCase('es').includes(term)))},[projects,query])
+  const filtered=useMemo(()=>{const term=query.toLocaleLowerCase('es');return projects.filter(project=>[project.id,project.id_proyecto,project.nombre_proyecto,project.provincia,project.distrito,project.estado].some(value=>String(value??'').toLocaleLowerCase('es').includes(term)))},[projects,query])
   const saved = async (_,editing,customNotice) => { setFormProject(undefined);setDirty(true);setNotice(customNotice||(editing?'Proyecto actualizado correctamente.':'Proyecto creado correctamente.'));await load() }
   const deactivate = async () => { try{await deleteProject(confirmProject.id);setConfirmProject(null);setDirty(true);setNotice('Proyecto desactivado correctamente.');await load()}catch(err){setError(err.message||'No fue posible desactivar el proyecto.')} }
   return <div className="admin-shell">
